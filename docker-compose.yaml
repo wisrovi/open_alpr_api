@@ -1,0 +1,36 @@
+version: '3.8'
+
+
+x-resources: &resources_gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia # use the GPU of the host
+            device_ids: ["0"] # use the GPU 0
+            capabilities: [gpu] # use the GPU
+
+
+services:
+  alpr:
+    image: wisrovi/open_alpr:1.0
+    # ports:
+    #   - "1037:8000"
+    restart: always
+
+  gradio-frontend:
+    <<: *resources_gpu
+    build:
+      context: ./gradio
+      dockerfile: Dockerfile
+    container_name: alpr_frontend
+    ports:
+      - "7860:7860" # Mapea el puerto 7860 del host al 7860 del contenedor
+    restart: always # Reinicia si el contenedor falla
+    depends_on:
+      - alpr # Asegura que la API se inicie antes que Gradio
+    environment:
+      # Configurar la URL de la API para Gradio.
+      # 'ocr-api' es el nombre del servicio Docker Compose, que actúa como hostname dentro de la red Docker.
+      # El puerto es el puerto interno del contenedor de la API (1037).
+      API_ENDPOINT: "http://alpr:8000/process_image/"
