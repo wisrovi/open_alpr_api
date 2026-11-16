@@ -33,7 +33,7 @@ class OpenALPRLitAPI(ls.LitAPI):
         self.api_path = api_path or settings.api_path
         self.max_batch_size = max_batch_size or settings.max_batch_size
         self.batch_timeout = batch_timeout or settings.batch_timeout
-        self.alpr_client: Optional[OpenALPRClient] = None
+        self.alpr_client: Optional[Any] = None
         self.yolo: Optional[YOLOInference] = None
         self.pipeline: Optional[ALPRPipeline] = None
 
@@ -45,11 +45,25 @@ class OpenALPRLitAPI(ls.LitAPI):
         """
         logger.info(f"Initializing OpenALPRLitAPI on device '{device}'...")
 
-        # Initialize OpenALPR backend client
-        self.alpr_client = OpenALPRClient(
-            endpoint=settings.openalpr_endpoint,
-            timeout=settings.openalpr_timeout_sec,
-        )
+        # Initialize ALPR engine (GPU deep learning or C++ OpenALPR backend)
+        if settings.alpr_engine == "gpu":
+            from .gpu_alpr import GPUALPREngine
+
+            gpu_device = "cuda" if "cuda" in str(device).lower() else settings.gpu_device
+            logger.info(
+                "Initializing GPU ALPR Engine (YOLO-LPD + MobileViT OCR) on %s...", gpu_device
+            )
+            self.alpr_client = GPUALPREngine(
+                detector_model=settings.gpu_detector_model,
+                ocr_model=settings.gpu_ocr_model,
+                device=gpu_device,
+            )
+        else:
+            logger.info("Initializing legacy OpenALPR C++ client connecting to %s...", settings.openalpr_endpoint)
+            self.alpr_client = OpenALPRClient(
+                endpoint=settings.openalpr_endpoint,
+                timeout=settings.openalpr_timeout_sec,
+            )
 
         # Ensure model file exists or download via Ultralytics
         if not os.path.exists(settings.yolo_model) and settings.yolo_model.endswith(".pt"):
@@ -185,22 +199,22 @@ class OpenALPRLitAPI(ls.LitAPI):
         # Build 100% backward-compatible command_output: List[List[str]]
         # Returns one entry [plate, confidence] per detected vehicle plate
         command_output: List[List[str]] = []
-        best_plate = output.get("license_plate", {}).get("plate")
-        best_conf = output.get("license_plate", {}).get("confidence")
+        candidates = output.get("license_plate", {}).get("candidates", [])
 
-        if best_plate:
-            command_output.append(
-                [str(best_plate), f"{best_conf:.3f}" if best_conf is not None else "0.0"]
-            )
-        elif output.get("license_plate", {}).get("candidates"):
-            for c in output["license_plate"]["candidates"]:
+        if candidates:
+            for c in candidates:
                 p = c.get("plate")
                 conf = c.get("confidence")
                 if p:
                     command_output.append(
                         [str(p), f"{conf:.3f}" if conf is not None else "0.0"]
                     )
-                    break
+        elif output.get("license_plate", {}).get("plate"):
+            best_plate = output["license_plate"]["plate"]
+            best_conf = output["license_plate"].get("confidence")
+            command_output.append(
+                [str(best_plate), f"{best_conf:.3f}" if best_conf is not None else "0.0"]
+            )
 
         # Build 100% backward-compatible command_error: List[str]
         command_error: List[str] = []
