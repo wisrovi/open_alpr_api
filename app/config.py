@@ -14,10 +14,10 @@ class Settings:
         default_factory=lambda: os.getenv("API_HOST", "0.0.0.0")
     )
     port: int = field(
-        default_factory=lambda: int(os.getenv("API_PORT", "8000"))
+        default_factory=lambda: int(os.getenv("API_PORT", "1037"))
     )
     api_path: str = field(
-        default_factory=lambda: os.getenv("API_PATH", "/predict")
+        default_factory=lambda: os.getenv("API_PATH", "/process_image/")
     )
 
     # OpenALPR backend service configuration
@@ -48,13 +48,21 @@ class Settings:
         default_factory=lambda: int(os.getenv("MAX_BATCH_SIZE", "8"))
     )
     batch_timeout: float = field(
-        default_factory=lambda: float(os.getenv("BATCH_TIMEOUT", "0.02"))
+        default_factory=lambda: float(os.getenv("BATCH_TIMEOUT", "0.0"))
     )
     workers_per_device: int = field(
         default_factory=lambda: int(os.getenv("WORKERS_PER_DEVICE", "1"))
     )
     accelerator: str = field(
         default_factory=lambda: os.getenv("ACCELERATOR", "auto")
+    )
+
+    # Adaptive Crop and Encoding Optimizations
+    max_crop_dim: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CROP_DIM", "680"))
+    )
+    jpeg_quality: int = field(
+        default_factory=lambda: int(os.getenv("JPEG_QUALITY", "80"))
     )
 
     # Target COCO classes for vehicles: 2=car, 3=motorcycle, 5=bus, 7=truck
