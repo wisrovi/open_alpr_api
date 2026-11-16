@@ -10,9 +10,12 @@ x-resources: &resources_gpu
             capabilities: [gpu]
 
 services:
-  # OpenALPR Core OCR Backend Service
+  # OpenALPR Core OCR Backend Service (In-Memory C++ Bindings)
   alpr:
-    image: wisrovi/open_alpr:1.0
+    build:
+      context: ./openalpr_backend
+      dockerfile: Dockerfile
+    image: wisrovi/open_alpr:1.1.0
     container_name: alpr_backend
     restart: always
 
@@ -26,19 +29,21 @@ services:
     container_name: alpr_api
     restart: always
     ports:
-      - "8000:8000"
+      - "1037:1037"
     depends_on:
       - alpr
     environment:
       API_HOST: "0.0.0.0"
-      API_PORT: "8000"
+      API_PORT: "1037"
       OPENALPR_ENDPOINT: "http://alpr:8000/process_image/"
       YOLO_MODEL: "yolo11n.pt"
       IMGSZ: "640"
       CONF_THRESHOLD: "0.25"
       QUANTIZATION: "16"
       MAX_BATCH_SIZE: "8"
-      BATCH_TIMEOUT: "0.02"
+      BATCH_TIMEOUT: "0.0"
+      MAX_CROP_DIM: "680"
+      JPEG_QUALITY: "80"
       ACCELERATOR: "auto"
 
   # Lightweight Gradio Web UI Frontend
@@ -54,4 +59,4 @@ services:
     depends_on:
       - api
     environment:
-      API_ENDPOINT: "http://api:8000/predict"
+      API_ENDPOINT: "http://api:1037/process_image/"
