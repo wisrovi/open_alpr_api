@@ -23,6 +23,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# Configure dynamic linker for NVIDIA CUDA and cuDNN libraries
+RUN echo "/usr/local/lib/python3.11/site-packages/nvidia/cu13/lib" > /etc/ld.so.conf.d/nvidia.conf && \
+    echo "/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib" >> /etc/ld.so.conf.d/nvidia.conf && \
+    ldconfig
+
+ENV LD_LIBRARY_PATH="/usr/local/lib/python3.11/site-packages/nvidia/cu13/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
+
 # Pre-download YOLO weights and GPU ALPR models during build for instant startup
 RUN python3 -c "from ultralytics import YOLO; YOLO('yolo11n.pt')" && \
     python3 -c "from fast_alpr import ALPR; ALPR(detector_model='yolo-v9-t-384-license-plate-end2end', ocr_model='european-plates-mobile-vit-v2-model')" || true
