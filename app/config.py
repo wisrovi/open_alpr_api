@@ -31,6 +31,24 @@ class Settings:
         default_factory=lambda: float(os.getenv("OPENALPR_TIMEOUT_SEC", "15.0"))
     )
 
+    # ALPR Engine Selection: 'gpu' (YOLO-LPD + MobileViT OCR) or 'openalpr' (C++ Backend)
+    alpr_engine: str = field(
+        default_factory=lambda: os.getenv("ALPR_ENGINE", "gpu").lower()
+    )
+    gpu_detector_model: str = field(
+        default_factory=lambda: os.getenv(
+            "GPU_DETECTOR_MODEL", "yolo-v9-t-384-license-plate-end2end"
+        )
+    )
+    gpu_ocr_model: str = field(
+        default_factory=lambda: os.getenv(
+            "GPU_OCR_MODEL", "european-plates-mobile-vit-v2-model"
+        )
+    )
+    gpu_device: str = field(
+        default_factory=lambda: os.getenv("GPU_DEVICE", "cuda")
+    )
+
     # Model and inference configuration
     yolo_model: str = field(
         default_factory=lambda: os.getenv("YOLO_MODEL", "yolo11n.pt")

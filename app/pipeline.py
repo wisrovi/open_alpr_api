@@ -12,6 +12,7 @@ from wyolo.inference import YOLOInference
 from .client import OpenALPRClient
 from .config import settings
 from .decoder import decode_image_bytes
+from .tracker import VehicleTracker
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ class ALPRPipeline:
         max_workers: int = 16,
         max_crop_dim: Optional[int] = None,
         jpeg_quality: Optional[int] = None,
+        max_concurrent_vehicles: int = 4,
+        enable_tracking: bool = False,
+        enhance_contrast: bool = True,
     ) -> None:
         """Initialize pipeline with optional ROI pre-cropping optimization.
 
@@ -41,6 +45,9 @@ class ALPRPipeline:
             max_workers: ThreadPoolExecutor worker count for concurrent dispatch.
             max_crop_dim: Maximum width/height dimension for vehicle crop before OpenALPR.
             jpeg_quality: JPEG compression quality for cropped payload (1-100).
+            max_concurrent_vehicles: Maximum vehicles to query concurrently per frame.
+            enable_tracking: Whether to track vehicles across frames and cache plates.
+            enhance_contrast: Whether to apply CLAHE contrast enhancement on crops.
         """
         self.yolo = yolo_predictor
         self.alpr = alpr_client
@@ -49,6 +56,10 @@ class ALPRPipeline:
         self.roi_padding = roi_padding
         self.max_crop_dim = max_crop_dim or settings.max_crop_dim
         self.jpeg_quality = jpeg_quality or settings.jpeg_quality
+        self.max_concurrent_vehicles = max_concurrent_vehicles
+        self.enable_tracking = enable_tracking
+        self.enhance_contrast = enhance_contrast
+        self.tracker = VehicleTracker()
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
     def _infer_vehicles(self, image_input: Any) -> List[Dict[str, Any]]:
@@ -139,44 +150,98 @@ class ALPRPipeline:
         if self.enable_roi_crop:
             # 1. Detect vehicles using wyolo (fast TensorRT/FP16)
             vehicles = self._infer_vehicles(image_bgr)
+            detected_plates_map: List[Tuple[str, float]] = []
 
             if vehicles:
-                # 2. Extract primary vehicle and crop ROI
-                primary = vehicles[0]
-                orig_bbox = primary.get("bbox", [0, 0, 0, 0])
-                c_x1, c_y1, c_x2, c_y2 = self._compute_padded_roi(
-                    orig_bbox, image_bgr.shape
+                tracked_info = (
+                    self.tracker.update(vehicles)
+                    if self.enable_tracking
+                    else [(v, None, None, None) for v in vehicles]
                 )
-                crop_bgr = image_bgr[c_y1:c_y2, c_x1:c_x2]
 
-                if crop_bgr.size > 0:
-                    # Adaptive crop rescaling: cap maximum dimension to reduce OpenALPR scan area
-                    ch, cw = crop_bgr.shape[:2]
-                    if max(ch, cw) > self.max_crop_dim:
-                        scale = self.max_crop_dim / float(max(ch, cw))
-                        crop_bgr = cv2.resize(
-                            crop_bgr,
-                            (int(cw * scale), int(ch * scale)),
-                            interpolation=cv2.INTER_AREA,
-                        )
+                # Prepare crops for concurrent dispatch across available vehicles
+                crops_to_query: List[Tuple[Optional[int], bytes, Dict[str, Any]]] = []
+                for det, track_id, cached_plate, cached_conf in tracked_info[: self.max_concurrent_vehicles]:
+                    # Fast-path: if plate was already recognized with high confidence, reuse it
+                    if cached_plate and cached_conf:
+                        detected_plates_map.append((cached_plate, cached_conf))
+                        continue
 
-                    _, crop_encoded = cv2.imencode(
-                        ".jpg", crop_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
+                    orig_bbox = det.get("bbox", [0, 0, 0, 0])
+                    c_x1, c_y1, c_x2, c_y2 = self._compute_padded_roi(
+                        orig_bbox, image_bgr.shape
                     )
-                    crop_bytes = crop_encoded.tobytes()
+                    crop_bgr = image_bgr[c_y1:c_y2, c_x1:c_x2]
 
-                    # Query OpenALPR with the lightweight vehicle crop
-                    plate_text, plate_conf, all_plates, alpr_error = (
-                        self.alpr.process_image_bytes(crop_bytes)
-                    )
-                    roi_cropped = True
-                    crop_bbox = [c_x1, c_y1, c_x2, c_y2]
+                    if crop_bgr.size > 0:
+                        # CLAHE contrast enhancement for challenging lighting conditions
+                        if self.enhance_contrast:
+                            lab = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2LAB)
+                            l, a, b = cv2.split(lab)
+                            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                            cl = clahe.apply(l)
+                            crop_bgr = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
 
-            # If no plate found in crop or no vehicle detected, fallback to full image
-            if not plate_text and not alpr_error:
-                plate_text, plate_conf, all_plates, alpr_error = (
-                    self.alpr.process_image_bytes(image_bytes)
-                )
+                        # Adaptive crop rescaling: cap maximum dimension
+                        ch, cw = crop_bgr.shape[:2]
+                        if max(ch, cw) > self.max_crop_dim:
+                            scale = self.max_crop_dim / float(max(ch, cw))
+                            crop_bgr = cv2.resize(
+                                crop_bgr,
+                                (int(cw * scale), int(ch * scale)),
+                                interpolation=cv2.INTER_AREA,
+                            )
+
+                        crops_to_query.append((track_id, crop_bgr, det))
+
+                # Dispatch queries in parallel via thread pool executor
+                if crops_to_query:
+                    def _query_alpr(img_data: Any):
+                        if hasattr(self.alpr, "process_image_bgr") and isinstance(img_data, np.ndarray):
+                            res = self.alpr.process_image_bgr(img_data)
+                            if isinstance(res, (tuple, list)) and len(res) == 4:
+                                return res
+                        if isinstance(img_data, np.ndarray):
+                            _, enc = cv2.imencode(
+                                ".jpg", img_data, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
+                            )
+                            return self.alpr.process_image_bytes(enc.tobytes())
+                        return self.alpr.process_image_bytes(img_data)
+
+                    futures = [
+                        (item[0], item[2], self.executor.submit(_query_alpr, item[1]))
+                        for item in crops_to_query
+                    ]
+                    for track_id, det, fut in futures:
+                        p_text, p_conf, p_candidates, err = fut.result()
+                        if p_text and p_conf:
+                            detected_plates_map.append((p_text, p_conf))
+                            if self.enable_tracking and track_id is not None:
+                                self.tracker.record_plate(track_id, p_text, p_conf)
+                        if err and not alpr_error:
+                            alpr_error = err
+
+                roi_cropped = len(crops_to_query) > 0
+                if vehicles:
+                    primary_bbox = vehicles[0].get("bbox", [0, 0, 0, 0])
+                    crop_bbox = list(self._compute_padded_roi(primary_bbox, image_bgr.shape))
+
+            # If no plate found in any vehicle crop, fallback to full image
+            if not detected_plates_map and not alpr_error:
+                res = None
+                if hasattr(self.alpr, "process_image_bgr") and image_bgr is not None:
+                    candidate_res = self.alpr.process_image_bgr(image_bgr)
+                    if isinstance(candidate_res, (tuple, list)) and len(candidate_res) == 4:
+                        res = candidate_res
+                if res is None:
+                    res = self.alpr.process_image_bytes(image_bytes)
+                p_text, p_conf, p_candidates, alpr_error = res
+                if p_text and p_conf:
+                    detected_plates_map.append((p_text, p_conf))
+
+            plate_text = detected_plates_map[0][0] if detected_plates_map else None
+            plate_conf = detected_plates_map[0][1] if detected_plates_map else None
+            all_plates = [{"plate": p, "confidence": c} for p, c in detected_plates_map]
 
         else:
             # Parallel execution without pre-cropping

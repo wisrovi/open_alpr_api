@@ -112,6 +112,27 @@ class OpenALPRClient:
             logger.error(err)
             return None, None, [], err
 
+    def process_image_bgr(
+        self, image_bgr: Any, jpeg_quality: int = 80
+    ) -> Tuple[Optional[str], Optional[float], List[Dict[str, Any]], Optional[str]]:
+        """Encode OpenCV BGR image matrix and process via OpenALPR.
+
+        Args:
+            image_bgr: OpenCV image matrix in BGR format.
+            jpeg_quality: JPEG compression quality (1-100).
+
+        Returns:
+            Tuple of (winning_plate, winning_confidence, candidate_list, error_message)
+        """
+        import cv2
+
+        ok, encoded = cv2.imencode(
+            ".jpg", image_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
+        )
+        if not ok:
+            return None, None, [], "Failed to encode image to JPEG"
+        return self.process_image_bytes(encoded.tobytes())
+
     def close(self) -> None:
         """Close underlying HTTP session and release sockets."""
         self.session.close()

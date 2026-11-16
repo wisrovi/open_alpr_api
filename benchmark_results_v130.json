@@ -1,0 +1,45 @@
+{
+  "model_architecture": {
+    "detector": "YOLO-v9-t-384 End-to-End LPD",
+    "ocr": "MobileViT-v2 European Plate Recognizer",
+    "device": "NVIDIA GeForce RTX 3060 (12GB VRAM)",
+    "acceleration": "CUDAExecutionProvider (cuDNN 9 / CUDA 13)"
+  },
+  "quality_metrics": {
+    "ground_truth": "2000DFL",
+    "predicted_plate": "2000DFL",
+    "exact_match": true,
+    "accuracy_percent": 100.0,
+    "character_error_rate_cer": 0.0,
+    "confidence_score": 77.61,
+    "schema_backward_compatibility": true,
+    "sample_response_json": {
+      "command_error": [],
+      "command_output": [
+        [
+          "2000DFL",
+          "77.61"
+        ]
+      ],
+      "status": "success"
+    }
+  },
+  "latency_metrics_ms": {
+    "iterations": 50,
+    "mean": 10.79,
+    "median_p50": 10.57,
+    "p90": 11.69,
+    "p95": 12.98,
+    "p99": 14.14,
+    "min": 9.87,
+    "max": 14.18,
+    "std": 0.91
+  },
+  "throughput_metrics": {
+    "frames_per_second_fps": 92.67,
+    "latency_reduction_vs_legacy_v1_0": "96.3%",
+    "speedup_vs_legacy_v1_0": "28.8x faster",
+    "latency_reduction_vs_v1_1_cpp": "92.2%",
+    "speedup_vs_v1_1_cpp": "12.9x faster"
+  }
+}
