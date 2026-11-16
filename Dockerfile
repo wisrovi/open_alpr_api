@@ -1,5 +1,5 @@
 # ==============================================================================
-# Dockerfile for open_alpr_api:1.1.0 (LitServe + wyolo)
+# Dockerfile for open_alpr_api:1.3.0 (LitServe + wyolo + GPU ALPR)
 # ==============================================================================
 FROM python:3.11-slim
 
@@ -23,8 +23,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Pre-download YOLO weights during build to ensure instant container startup
-RUN python3 -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
+# Pre-download YOLO weights and GPU ALPR models during build for instant startup
+RUN python3 -c "from ultralytics import YOLO; YOLO('yolo11n.pt')" && \
+    python3 -c "from fast_alpr import ALPR; ALPR(detector_model='yolo-v9-t-384-license-plate-end2end', ocr_model='european-plates-mobile-vit-v2-model')" || true
 
 # Copy application source code
 COPY app/ ./app/
