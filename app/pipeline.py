@@ -26,7 +26,9 @@ class ALPRPipeline:
         vehicle_classes: Optional[Set[int]] = None,
         enable_roi_crop: bool = True,
         roi_padding: float = 0.15,
-        max_workers: int = 4,
+        max_workers: int = 16,
+        max_crop_dim: Optional[int] = None,
+        jpeg_quality: Optional[int] = None,
     ) -> None:
         """Initialize pipeline with optional ROI pre-cropping optimization.
 
@@ -37,12 +39,16 @@ class ALPRPipeline:
             enable_roi_crop: Whether to crop vehicle ROI before querying OpenALPR.
             roi_padding: Percentage padding to add around vehicle bounding box.
             max_workers: ThreadPoolExecutor worker count for concurrent dispatch.
+            max_crop_dim: Maximum width/height dimension for vehicle crop before OpenALPR.
+            jpeg_quality: JPEG compression quality for cropped payload (1-100).
         """
         self.yolo = yolo_predictor
         self.alpr = alpr_client
         self.vehicle_classes = vehicle_classes or settings.vehicle_classes
         self.enable_roi_crop = enable_roi_crop
         self.roi_padding = roi_padding
+        self.max_crop_dim = max_crop_dim or settings.max_crop_dim
+        self.jpeg_quality = jpeg_quality or settings.jpeg_quality
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
     def _infer_vehicles(self, image_input: Any) -> List[Dict[str, Any]]:
@@ -58,7 +64,7 @@ class ALPRPipeline:
         filtered_vehicles: List[Dict[str, Any]] = []
 
         for det in raw_detections:
-            cls_id = int(det.get("class", -1))
+            cls_id = int(det.get("class_id", det.get("class", -1)))
             if cls_id in self.vehicle_classes:
                 x1, y1, x2, y2 = det.get("bbox", [0, 0, 0, 0])
                 area = max(0, x2 - x1) * max(0, y2 - y1)
@@ -144,8 +150,18 @@ class ALPRPipeline:
                 crop_bgr = image_bgr[c_y1:c_y2, c_x1:c_x2]
 
                 if crop_bgr.size > 0:
+                    # Adaptive crop rescaling: cap maximum dimension to reduce OpenALPR scan area
+                    ch, cw = crop_bgr.shape[:2]
+                    if max(ch, cw) > self.max_crop_dim:
+                        scale = self.max_crop_dim / float(max(ch, cw))
+                        crop_bgr = cv2.resize(
+                            crop_bgr,
+                            (int(cw * scale), int(ch * scale)),
+                            interpolation=cv2.INTER_AREA,
+                        )
+
                     _, crop_encoded = cv2.imencode(
-                        ".jpg", crop_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+                        ".jpg", crop_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
                     )
                     crop_bytes = crop_encoded.tobytes()
 
