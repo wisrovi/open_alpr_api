@@ -2,10 +2,11 @@
 
 import base64
 import logging
-from typing import Any, Dict, Optional, Tuple
+import os
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import Request, Response, WebSocket, WebSocketDisconnect
 import litserve as ls
 import numpy as np
 from wyolo.inference import YOLOInference
@@ -50,6 +51,14 @@ class OpenALPRLitAPI(ls.LitAPI):
             timeout=settings.openalpr_timeout_sec,
         )
 
+        # Ensure model file exists or download via Ultralytics
+        if not os.path.exists(settings.yolo_model) and settings.yolo_model.endswith(".pt"):
+            try:
+                from ultralytics import YOLO
+                YOLO(settings.yolo_model)
+            except Exception as exc:
+                logger.warning(f"Could not pre-download model: {exc}")
+
         # Initialize wyolo unified predictor (supports FP16 TensorRT or PyTorch)
         self.yolo = YOLOInference(
             model_path=settings.yolo_model,
@@ -78,7 +87,7 @@ class OpenALPRLitAPI(ls.LitAPI):
             logger.warning(f"Warmup notice: {exc}")
 
     def decode_request(
-        self, request: Any, **kwargs: Any
+        self, request: Request, **kwargs: Any
     ) -> Tuple[bytes, np.ndarray, bool]:
         """Decode incoming request payload into image bytes and decoded OpenCV matrix.
 
@@ -105,6 +114,7 @@ class OpenALPRLitAPI(ls.LitAPI):
 
         # Extract bytes from Starlette UploadFile if present
         if hasattr(raw_data, "file"):
+            raw_data.file.seek(0)
             image_bytes = raw_data.file.read()
         elif hasattr(raw_data, "read"):
             image_bytes = raw_data.read()
@@ -121,17 +131,34 @@ class OpenALPRLitAPI(ls.LitAPI):
         image_bgr, _ = decode_image_bytes(image_bytes)
         return image_bytes, image_bgr, annotate
 
-    def predict(self, decoded_input: Tuple[bytes, np.ndarray, bool]) -> Dict[str, Any]:
-        """Execute inference pipeline on preprocessed input.
+    def predict(
+        self,
+        decoded_input: Union[
+            Tuple[bytes, np.ndarray, bool], List[Tuple[bytes, np.ndarray, bool]]
+        ],
+    ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+        """Execute inference pipeline on preprocessed input (handles single or batched inputs).
 
         Args:
-            decoded_input: Tuple of (raw_image_bytes, image_bgr, annotate_flag).
+            decoded_input: Either a single tuple or a list of tuples: (raw_image_bytes, image_bgr, annotate_flag).
 
         Returns:
-            Structured pipeline result dictionary.
+            Pipeline result dictionary or list of result dictionaries when batched.
         """
         if self.pipeline is None:
             raise RuntimeError("API pipeline is not initialized. Run setup() first.")
+
+        if isinstance(decoded_input, list):
+            futures = [
+                self.pipeline.executor.submit(
+                    self.pipeline.process_single,
+                    image_bytes=item[0],
+                    image_bgr=item[1],
+                    annotate=item[2],
+                )
+                for item in decoded_input
+            ]
+            return [f.result() for f in futures]
 
         image_bytes, image_bgr, annotate = decoded_input
         return self.pipeline.process_single(
@@ -141,7 +168,13 @@ class OpenALPRLitAPI(ls.LitAPI):
         )
 
     def encode_response(self, output: Dict[str, Any]) -> Dict[str, Any]:
-        """Format pipeline output into standardized client JSON response.
+        """Format pipeline output with 100% backward-compatible keys and v1.1.0 extensions.
+
+        Ensures full compatibility with legacy consumers expecting:
+            - "status": "success" | "error" | "empty"
+            - "command_output": [ [plate_str, confidence_str], ... ]
+            - "command_error": [ ... ]
+        While simultaneously providing rich v1.1.0 vehicle and latency metadata.
 
         Args:
             output: Result dictionary from pipeline.
@@ -149,18 +182,54 @@ class OpenALPRLitAPI(ls.LitAPI):
         Returns:
             JSON-serializable response dictionary.
         """
+        # Build 100% backward-compatible command_output: List[List[str]]
+        # Returns one entry [plate, confidence] per detected vehicle plate
+        command_output: List[List[str]] = []
+        best_plate = output.get("license_plate", {}).get("plate")
+        best_conf = output.get("license_plate", {}).get("confidence")
+
+        if best_plate:
+            command_output.append(
+                [str(best_plate), f"{best_conf:.3f}" if best_conf is not None else "0.0"]
+            )
+        elif output.get("license_plate", {}).get("candidates"):
+            for c in output["license_plate"]["candidates"]:
+                p = c.get("plate")
+                conf = c.get("confidence")
+                if p:
+                    command_output.append(
+                        [str(p), f"{conf:.3f}" if conf is not None else "0.0"]
+                    )
+                    break
+
+        # Build 100% backward-compatible command_error: List[str]
+        command_error: List[str] = []
+        if output.get("backend_error"):
+            command_error.append(str(output["backend_error"]))
+
+        status_str = (
+            "success"
+            if (command_output or output.get("status") == "success")
+            else "error"
+            if command_error
+            else "empty"
+        )
+
+        # 100% Strict Legacy API Schema
         response: Dict[str, Any] = {
-            "status": output.get("status", "unknown"),
-            "license_plate": output.get("license_plate", {}),
-            "primary_vehicle": output.get("primary_vehicle"),
-            "all_vehicles": output.get("all_vehicles", []),
-            "latency_ms": output.get("latency_ms", 0.0),
-            "roi_cropped": output.get("roi_cropped", False),
-            "crop_bbox": output.get("crop_bbox"),
+            "command_error": command_error,
+            "command_output": command_output,
+            "status": status_str,
         }
 
-        if output.get("backend_error"):
-            response["backend_error"] = output["backend_error"]
+        # Include extended debug metadata only if explicitly requested
+        if output.get("extended"):
+            response["license_plate"] = output.get("license_plate", {})
+            response["primary_vehicle"] = output.get("primary_vehicle")
+            response["all_vehicles"] = output.get("all_vehicles", [])
+            response["latency_ms"] = output.get("latency_ms", 0.0)
+            response["roi_cropped"] = output.get("roi_cropped", False)
+            response["crop_bbox"] = output.get("crop_bbox")
 
         if "annotated_image" in output and output["annotated_image"] is not None:
             _, buffer = cv2.imencode(
@@ -190,6 +259,18 @@ def create_server(api_path: Optional[str] = None) -> ls.LitServer:
         accelerator=settings.accelerator,
         workers_per_device=settings.workers_per_device,
     )
+
+    # Register route aliases for seamless backward compatibility across all client paths
+    api_target = api_path or settings.api_path
+    handler = None
+    for r in server.app.routes:
+        if hasattr(r, "path") and r.path == api_target:
+            handler = r.endpoint
+            break
+    if handler:
+        for alias in ["/process_image", "/process_image/", "/predict"]:
+            if alias != api_target:
+                server.app.add_api_route(alias, handler, methods=["POST"])
 
     # Register Real-Time Bi-Directional WebSocket Streaming Route
     @server.app.websocket("/ws/stream")
