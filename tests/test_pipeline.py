@@ -178,3 +178,44 @@ def test_pipeline_annotation_generation(
     annotated = result["annotated_image"]
     assert isinstance(annotated, np.ndarray)
     assert annotated.shape == sample_image.shape
+
+
+def test_pipeline_adaptive_crop_rescaling(
+    mock_yolo: MagicMock, mock_alpr: MagicMock
+) -> None:
+    """Validate that overly large vehicle crops are adaptively rescaled before OpenALPR query.
+
+    What this test does:
+    1. Creates a large 1000x1000 image with a large vehicle detection [100, 100, 900, 900].
+    2. Initializes ALPRPipeline with max_crop_dim=500.
+    3. Verifies that the crop sent to mock_alpr has dimensions constrained to max_crop_dim.
+    """
+    large_img = np.zeros((1000, 1000, 3), dtype=np.uint8)
+    _, buf = cv2.imencode(".jpg", large_img)
+    large_bytes = buf.tobytes()
+
+    mock_yolo.predict.return_value = [
+        {"bbox": [100, 100, 900, 900], "conf": 0.95, "class": 2, "class_name": "car"}
+    ]
+    captured_bytes = []
+
+    def capture_alpr_call(crop_data: bytes) -> tuple:
+        captured_bytes.append(crop_data)
+        return ("RESCALE123", 95.0, [], None)
+
+    mock_alpr.process_image_bytes.side_effect = capture_alpr_call
+
+    pipeline = ALPRPipeline(
+        yolo_predictor=mock_yolo,
+        alpr_client=mock_alpr,
+        max_crop_dim=500,
+        enable_roi_crop=True,
+    )
+    result = pipeline.process_single(image_bytes=large_bytes, image_bgr=large_img)
+
+    assert result["status"] == "success"
+    assert len(captured_bytes) == 1
+    # Decode captured bytes and verify dimension was rescaled <= 500
+    nparr = np.frombuffer(captured_bytes[0], np.uint8)
+    decoded_crop = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    assert max(decoded_crop.shape[:2]) <= 500
