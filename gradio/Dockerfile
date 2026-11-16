@@ -1,30 +1,32 @@
-# Usa una imagen base de Python
-FROM python:3.10-slim-buster
+# ==============================================================================
+# Dockerfile for alpr_frontend:1.1.0 (Lightweight Gradio Web UI)
+# ==============================================================================
+FROM python:3.11-slim
 
-# Establece el directorio de trabajo dentro del contenedor
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    GRADIO_SERVER_NAME="0.0.0.0" \
+    GRADIO_SERVER_PORT=7860
+
 WORKDIR /app
 
-# Instala dependencias del sistema necesarias para OpenCV
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
-    libsm6 \
-    libxext6 \
-    ffmpeg \
-    libglib2.0-0 
-    # Clean up apt cache to reduce image size
-RUN rm -rf /var/lib/apt/lists/*
+# Minimal system runtime packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-
-# Copia los archivos de requisitos e instálalos primero para aprovechar el cache de Docker
+# Install lightweight web frontend requirements
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copia el código de la aplicación de Gradio
+# Copy frontend source code
 COPY api.py .
 
-# Expone el puerto que Gradio va a usar
+# Expose Gradio port
 EXPOSE 7860
 
-# Comando para ejecutar la aplicación de Gradio
-# Gradio por defecto usa el puerto 7860 y escucha en 0.0.0.0 cuando se lanza.
+# Launch Gradio interface
 CMD ["python", "api.py"]

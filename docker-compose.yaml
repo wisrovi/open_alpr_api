@@ -1,36 +1,62 @@
 version: '3.8'
 
-
 x-resources: &resources_gpu
   deploy:
     resources:
       reservations:
         devices:
-          - driver: nvidia # use the GPU of the host
-            device_ids: ["0"] # use the GPU 0
-            capabilities: [gpu] # use the GPU
-
+          - driver: nvidia
+            device_ids: ["0"]
+            capabilities: [gpu]
 
 services:
+  # OpenALPR Core OCR Backend Service (In-Memory C++ Bindings)
   alpr:
-    image: wisrovi/open_alpr:1.0
-    # ports:
-    #   - "1037:8000"
+    build:
+      context: ./openalpr_backend
+      dockerfile: Dockerfile
+    image: wisrovi/open_alpr:1.1.0
+    container_name: alpr_backend
     restart: always
 
-  gradio-frontend:
+  # LitServe + wyolo High-Throughput Inference API
+  api:
     <<: *resources_gpu
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wisrovi/open_alpr_api:1.1.0
+    container_name: alpr_api
+    restart: always
+    ports:
+      - "1037:1037"
+    depends_on:
+      - alpr
+    environment:
+      API_HOST: "0.0.0.0"
+      API_PORT: "1037"
+      OPENALPR_ENDPOINT: "http://alpr:8000/process_image/"
+      YOLO_MODEL: "yolo11n.pt"
+      IMGSZ: "640"
+      CONF_THRESHOLD: "0.25"
+      QUANTIZATION: "16"
+      MAX_BATCH_SIZE: "8"
+      BATCH_TIMEOUT: "0.0"
+      MAX_CROP_DIM: "680"
+      JPEG_QUALITY: "80"
+      ACCELERATOR: "auto"
+
+  # Lightweight Gradio Web UI Frontend
+  gradio-frontend:
     build:
       context: ./gradio
       dockerfile: Dockerfile
+    image: wisrovi/open_alpr_frontend:1.1.0
     container_name: alpr_frontend
+    restart: always
     ports:
-      - "7860:7860" # Mapea el puerto 7860 del host al 7860 del contenedor
-    restart: always # Reinicia si el contenedor falla
+      - "7860:7860"
     depends_on:
-      - alpr # Asegura que la API se inicie antes que Gradio
+      - api
     environment:
-      # Configurar la URL de la API para Gradio.
-      # 'ocr-api' es el nombre del servicio Docker Compose, que actúa como hostname dentro de la red Docker.
-      # El puerto es el puerto interno del contenedor de la API (1037).
-      API_ENDPOINT: "http://alpr:8000/process_image/"
+      API_ENDPOINT: "http://api:1037/process_image/"

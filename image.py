@@ -1,63 +1,130 @@
+"""Command-line client to send images to open_alpr_api LitServe endpoint."""
+
+import argparse
+import base64
 import json
-import requests
 import os
+import sys
+from typing import Optional
 
-# --- CONFIGURACIÓN ---
-# ¡IMPORTANTE! Asegúrate de que esta URL coincida con la URL de tu API de Flask
-API_ENDPOINT = "http://localhost:1037/process_image/" 
+import requests
 
-# Ruta a la imagen que quieres enviar
-# Asegúrate de que esta imagen exista en tu disco.
-# Puedes cambiarla por cualquier otra imagen de prueba.
-IMAGE_PATH = "test/rojo_4.png" # <--- ¡CAMBIA ESTO POR LA RUTA REAL DE TU IMAGEN!
+DEFAULT_ENDPOINT = os.getenv("API_ENDPOINT", "http://localhost:8000/predict")
 
-def send_image_to_api(image_path):
-    """
-    Envía una imagen local a la API de procesamiento de Flask
-    y muestra la respuesta.
+
+def send_image_to_api(
+    image_path: str,
+    endpoint: str = DEFAULT_ENDPOINT,
+    output_path: Optional[str] = None,
+    timeout: float = 15.0,
+) -> int:
+    """Send an image to the ALPR API endpoint and print structured results.
+
+    Args:
+        image_path: Path to the image file to send.
+        endpoint: HTTP URL of the LitServe API endpoint.
+        output_path: Optional path to write annotated image.
+        timeout: HTTP request timeout in seconds.
+
+    Returns:
+        Exit code: 0 on success, non-zero on failure.
     """
     if not os.path.exists(image_path):
-        print(f"Error: La imagen '{image_path}' no se encontró.")
-        return
+        print(f"Error: Image '{image_path}' not found.", file=sys.stderr)
+        return 1
 
-    print(f"Enviando imagen: {image_path} a {API_ENDPOINT}")
+    print(f"[*] Target Endpoint: {endpoint}")
+    print(f"[*] Sending image:   {image_path}")
 
     try:
-        # Abrir la imagen en modo binario para enviarla como archivo
-        with open(image_path, 'rb') as f:
-            # 'image' debe coincidir con el nombre del campo que tu API de Flask espera (request.files["image"])
-            # ('nombre_archivo.jpg', contenido_bytes, 'tipo_mime')
-            files = {'image': (os.path.basename(image_path), f.read(), 'image/jpeg')}
-            
-            # Enviar la solicitud POST
-            response = requests.post(API_ENDPOINT, files=files, timeout=10)
-            
-            # Lanzar una excepción si la solicitud no fue exitosa (código de estado 4xx o 5xx)
-            response.raise_for_status()
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
 
-            # Obtener y mostrar la respuesta JSON de la API
-            data_from_api = response.json()
-            print("\n--- Respuesta de la API ---")
-            print(data_from_api)
+        files = {"image": (os.path.basename(image_path), image_bytes, "image/jpeg")}
+        data = {"annotate": "true"} if output_path else {}
 
-            # Puedes añadir lógica aquí para procesar la 'command_output' si lo deseas
-            if data_from_api.get("status") == "success" and "command_output" in data_from_api:
-                print("\nDetecciones/Salida de OCR:")
-                for item in data_from_api["command_output"]:
-                    print(f"  - BBox: {item.get('bbox')}, Texto: '{item.get('text')}'")
-            elif data_from_api.get("status") == "error":
-                print(f"\nLa API retornó un error: {data_from_api.get('message', 'Error desconocido')}")
+        response = requests.post(endpoint, files=files, data=data, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+
+        print("\n================== API RESPONSE ==================")
+        print(json.dumps(payload, indent=2))
+        print("==================================================")
+
+        license_info = payload.get("license_plate", {})
+        plate = license_info.get("plate", "N/A")
+        confidence = license_info.get("confidence")
+        conf_str = f"{confidence:.2f}%" if confidence is not None else "N/A"
+        latency_ms = payload.get("latency_ms", 0.0)
+        vehicle_count = len(payload.get("all_vehicles", []))
+
+        print("\n--- Summary ---")
+        print(f"Detected Plate:    {plate}")
+        print(f"Confidence:        {conf_str}")
+        print(f"Vehicles Found:    {vehicle_count}")
+        print(f"Server Latency:    {latency_ms:.2f} ms")
+
+        # Save annotated image if requested and returned
+        b64_img = payload.get("annotated_image_base64")
+        if output_path and b64_img:
+            img_data = base64.b64decode(b64_img)
+            with open(output_path, "wb") as out_file:
+                out_file.write(img_data)
+            print(f"[+] Saved annotated image to: {output_path}")
+
+        return 0
 
     except requests.exceptions.Timeout:
-        print(f"Error: La solicitud excedió el tiempo de espera ({10} segundos).")
-    except requests.exceptions.RequestException as e:
-        print(f"Error de conexión con la API: {e}. Asegúrate de que tu API de Flask esté corriendo y sea accesible.")
-    except json.JSONDecodeError:
-        print("Error: La respuesta de la API no es un JSON válido.")
-        print("Respuesta de la API (texto crudo):", response.text)
-    except Exception as e:
-        print(f"Ocurrió un error inesperado: {e}")
+        print(f"Error: Request timed out after {timeout} seconds.", file=sys.stderr)
+        return 2
+    except requests.exceptions.RequestException as exc:
+        print(f"Connection error: {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:
+        print(f"Unexpected error: {exc}", file=sys.stderr)
+        return 4
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="CLI tool to test open_alpr_api high-performance inference."
+    )
+    parser.add_argument(
+        "image",
+        nargs="?",
+        default="test/rojo_4.png",
+        help="Path to the input image file (default: test/rojo_4.png)",
+    )
+    parser.add_argument(
+        "--endpoint",
+        "-e",
+        default=DEFAULT_ENDPOINT,
+        help=f"API URL endpoint (default: {DEFAULT_ENDPOINT})",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Optional path to save annotated output image",
+    )
+    parser.add_argument(
+        "--timeout",
+        "-t",
+        type=float,
+        default=15.0,
+        help="Request timeout in seconds (default: 15.0)",
+    )
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    # Llama a la función para enviar la imagen
-    send_image_to_api(IMAGE_PATH)
+    args = parse_args()
+    sys.exit(
+        send_image_to_api(
+            image_path=args.image,
+            endpoint=args.endpoint,
+            output_path=args.output,
+            timeout=args.timeout,
+        )
+    )
