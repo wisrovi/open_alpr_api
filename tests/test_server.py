@@ -101,14 +101,23 @@ def test_encode_response_formatting(
         "annotated_image": img,
     }
 
+    # Test default strict legacy response (only command_error, command_output, status)
     encoded = api_instance.encode_response(sample_output)
     assert encoded["status"] == "success"
-    assert encoded["license_plate"]["plate"] == "7777XYZ"
-    assert encoded["latency_ms"] == 35.5
-    assert encoded["roi_cropped"] is True
-    assert encoded["backend_error"] == "Notice: low contrast"
+    assert encoded["command_output"] == [["7777XYZ", "98.000"]]
+    assert encoded["command_error"] == ["Notice: low contrast"]
     assert "annotated_image_base64" in encoded
-    assert isinstance(encoded["annotated_image_base64"], str)
+    assert "license_plate" not in encoded
+    assert "primary_vehicle" not in encoded
+
+    # Test extended metadata response when explicitly requested
+    sample_output_extended = {**sample_output, "extended": True}
+    encoded_ext = api_instance.encode_response(sample_output_extended)
+    assert encoded_ext["status"] == "success"
+    assert encoded_ext["command_output"] == [["7777XYZ", "98.000"]]
+    assert encoded_ext["license_plate"]["plate"] == "7777XYZ"
+    assert encoded_ext["latency_ms"] == 35.5
+    assert encoded_ext["roi_cropped"] is True
 
 
 def test_predict_delegates_to_pipeline(
