@@ -32,7 +32,7 @@ The following core technologies and libraries drive the `open_alpr_api` platform
 * **[LitServe](https://github.com/Lightning-AI/LitServe)**: High-performance serving framework from Lightning AI designed for AI/ML inference workloads. Delivers native dynamic batching, multi-worker GPU process orchestration, and zero-copy streaming via FastAPI and uvloop.
 * **[wyolo](https://pypi.org/project/wyolo/)**: Corporate enterprise vision library providing automated TensorRT compilation, FP16/INT8 engine optimization, latency profiling, and unified object detection.
 * **[TorchVision SIMD IO](https://pytorch.org/vision/stable/io.html)**: High-throughput C++/SIMD image decoding pipeline (`torchvision.io.decode_image`), providing up to 4x faster image decode speeds than traditional OpenCV.
-* **[OpenALPR Engine](https://github.com/openalpr/openalpr)**: Dedicated OCR and pattern recognition backend engine (`wisrovi/open_alpr:1.0`) running in an isolated microservice container.
+* **[In-Memory OpenALPR C++ Engine](https://github.com/openalpr/openalpr)**: Dedicated in-memory OCR backend using native precompiled C++ bindings (`openalpr.Alpr`) and an instance pool (`AlprPool`) for zero-disk-I/O high-throughput recognition.
 * **[OpenCV Headless (opencv-python-headless)](https://pypi.org/project/opencv-python-headless/)**: High-performance computer vision library optimized for server containers without X11/GUI runtime dependencies.
 * **[FastAPI & WebSockets](https://fastapi.tiangolo.com/)**: Asynchronous web server layer providing REST endpoints and bi-directional WebSocket streaming (`/ws/stream`) for RTSP camera feeds.
 * **[Gradio](https://www.gradio.app/)**: Interactive web UI client decoupled from the ML engine for demonstration and rapid visual inspection.
@@ -43,31 +43,33 @@ The following core technologies and libraries drive the `open_alpr_api` platform
 
 ## 🏛 Architecture Overview
 
-In version **1.1.0**, the inference pipeline incorporates three major latency-reducing optimizations:
+In version **1.1.0**, the inference pipeline combines:
 
 ```
 [ Client / Camera / RTSP Stream ]
          │
-         ├──► HTTP POST /predict ────────┐
-         │                               ▼
+         ├──► HTTP POST /process_image/ ──┐
+         │                                ▼
          └──► WS Stream /ws/stream ──► [ Accelerated SIMD Decoder (TorchVision/OpenCV) ]
                                                  │ (~3 ms)
                                                  ▼
                                        [ wyolo TensorRT FP16 ]
-                                                 │ (~8 ms)
+                                                 │ (~10 ms)
                                                  ▼
-                                       [ ROI Pre-Cropping Engine ]
-                                                 │ (Crops vehicle bounding box)
+                                       [ Adaptive ROI Pre-Cropping Engine (<=680px) ]
+                                                 │ (Crops and scales vehicle bounding box)
                                                  ▼
-                                       [ OpenALPR Backend (:8000) ]
-                                                 │ (~12-15 ms on crop)
+                                       [ In-Memory OpenALPR C++ Pool (RAM) ]
+                                                 │ (~60-70 ms direct in memory)
                                                  ▼
-                                       [ JSON Result / WS Stream Response ]
+                                       [ 100% Backward-Compatible JSON Response ]
 ```
 
-1. **ROI Pre-Cropping (`ENABLE_ROI_CROP=true`)**: `wyolo` detects vehicle coordinates in ~8ms, crops the primary vehicle with 15% contextual padding (~400x300 instead of 1080p/4K), and submits the lightweight crop to OpenALPR. This drops OpenALPR's OCR latency from ~75ms down to **~12-15ms**!
-2. **Accelerated SIMD Image Decoding**: Uses SIMD-accelerated C++ decoding (`torchvision.io.decode_image`) in ~3.5ms compared to ~13ms in standard OpenCV.
-3. **Real-Time WebSocket Streaming (`/ws/stream`)**: Direct bi-directional binary frame streaming for continuous video feeds and security cameras without HTTP connection teardown overhead.
+1. **Adaptive ROI Pre-Cropping (`ENABLE_ROI_CROP=true`, `MAX_CROP_DIM=680`)**: `wyolo` detects vehicle coordinates in ~10ms, crops the vehicle with 15% contextual padding, and proportionally rescales oversized bounding boxes to a max dimension of 680px before OCR. This avoids searching through empty street background and drops OCR scanning latency by over **55%**.
+2. **In-Memory OpenALPR C++ Bindings (`openalpr_backend`)**: Replaces slow disk writes (`tempfile.mkdtemp()`) and per-request OS sub-processes (`subprocess.run(["alpr"])`) with direct memory calls (`engine.recognize_array(bytes)`) across an in-memory instance pool (`AlprPool`), cutting OCR latency from ~260ms down to **~60-70ms**.
+3. **Accelerated SIMD Image Decoding**: Uses SIMD-accelerated C++ decoding (`torchvision.io.decode_image`) in ~3.5ms compared to ~13ms in standard OpenCV.
+4. **Real-Time WebSocket Streaming (`/ws/stream`)**: Direct bi-directional binary frame streaming for continuous video feeds and security cameras without HTTP connection teardown overhead.
+5. **Zero Schema Drift**: 100% backward-compatible JSON schema returning exact `{"command_error": [], "command_output": [["PLATE", "CONF"]], "status": "success"}` on port `1037` and route `/process_image/`.
 
 ---
 
@@ -81,8 +83,8 @@ To run the complete ecosystem (OpenALPR backend + LitServe API + Gradio UI):
 docker-compose up --build -d
 ```
 
-* **LitServe API**: Accessible at `http://localhost:8000/predict`
-* **WebSocket Stream**: Accessible at `ws://localhost:8000/ws/stream`
+* **LitServe API**: Accessible at `http://localhost:1037/process_image/`
+* **WebSocket Stream**: Accessible at `ws://localhost:1037/ws/stream`
 * **Gradio Web Interface**: Accessible at `http://localhost:7860`
 
 ### 2. Standalone CLI Client (`image.py`)
@@ -90,56 +92,37 @@ docker-compose up --build -d
 Send an image directly to the LitServe inference API:
 
 ```bash
-# Basic detection
+# Basic detection (queries http://localhost:1037/process_image/ by default)
 python image.py test/rojo_4.png
 
-# Target custom endpoint and save annotated output
-python image.py test/rojo_4.png --endpoint http://localhost:8000/predict --output detected.jpg
+# Target custom endpoint
+python image.py test/rojo_4.png --endpoint http://localhost:1037/process_image/
 ```
 
 ---
 
 ## 📡 API Reference
 
-### 1. Endpoint: `POST /predict`
+### 1. Endpoint: `POST /process_image/` (also aliased to `/process_image` and `/predict`)
 
 #### Request (Multipart Form Data):
 * `image`: Binary image file (JPEG / PNG).
-* `annotate`: *(Optional, boolean)* Return base64 encoded annotated image.
 
-#### Response (JSON):
+#### Response (100% Backward-Compatible JSON):
 ```json
 {
-  "status": "success",
-  "license_plate": {
-    "plate": "1234ABC",
-    "confidence": 94.50,
-    "candidates": [
-      {"plate": "1234ABC", "confidence": 94.50}
+  "command_error": [],
+  "command_output": [
+    [
+      "2000DFL",
+      "91.582"
     ]
-  },
-  "primary_vehicle": {
-    "bbox": [120, 150, 480, 520],
-    "conf": 0.92,
-    "class": 2,
-    "class_name": "car",
-    "area": 133200
-  },
-  "all_vehicles": [
-    {
-      "bbox": [120, 150, 480, 520],
-      "conf": 0.92,
-      "class": 2,
-      "area": 133200
-    }
   ],
-  "latency_ms": 22.45,
-  "roi_cropped": true,
-  "crop_bbox": [102, 130, 498, 540]
+  "status": "success"
 }
 ```
 
-### 2. WebSocket Endpoint: `ws://localhost:8000/ws/stream`
+### 2. WebSocket Endpoint: `ws://localhost:1037/ws/stream`
 
 Connect via WebSocket client, send binary JPEG frames sequentially, and receive structured JSON responses instantly per frame without HTTP framing overhead.
 
